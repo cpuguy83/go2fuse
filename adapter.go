@@ -7,6 +7,7 @@ import (
 	"io"
 	iofs "io/fs"
 	"path"
+	"sync"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -142,8 +143,9 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 // fileHandle wraps an open fs.File for FUSE read operations.
 type fileHandle struct {
+	mu   sync.Mutex
 	file iofs.File
-	pos  int64 // current read position for sequential access
+	pos  int64 // current read position for sequential access (no Seeker)
 }
 
 // Compile-time interface checks.
@@ -152,8 +154,27 @@ var _ fs.FileReleaser = (*fileHandle)(nil)
 
 func (fh *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	// Use ReaderAt for correct offset-based reads when available.
+	// ReaderAt is defined as safe for concurrent use.
 	if ra, ok := fh.file.(io.ReaderAt); ok {
 		n, err := ra.ReadAt(dest, off)
+		if err != nil && err != io.EOF {
+			return nil, toErrno(err)
+		}
+		return fuse.ReadResultData(dest[:n]), 0
+	}
+
+	// Both remaining paths require serialization: the seeker path needs
+	// seek+read atomicity, and the sequential path needs pos consistency.
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+
+	// Seek to the requested offset and read. This handles arbitrary
+	// offsets (including concurrent FUSE async reads) correctly.
+	if s, ok := fh.file.(io.Seeker); ok {
+		if _, err := s.Seek(off, io.SeekStart); err != nil {
+			return nil, toErrno(err)
+		}
+		n, err := fh.file.Read(dest)
 		if err != nil && err != io.EOF {
 			return nil, toErrno(err)
 		}

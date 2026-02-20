@@ -62,4 +62,4 @@ All write operations are rejected with `EROFS`.
 
 - **Read-only** — matches `io/fs.FS` semantics, no write support.
 - **No symlink targets** — `io/fs.FS` has no `Readlink` equivalent. Symlinks are detected in mode bits but targets cannot be resolved.
-- **Sequential-only readers** — `fs.File` implementations without `io.ReaderAt` or `io.Seeker` will have poor random-read performance since data must be read and discarded up to the requested offset.
+- **Sequential-only readers** — `fs.File` implementations without `io.ReaderAt` or `io.Seeker` only support sequential access. Non-sequential offsets return `EIO`; the kernel retries with smaller page-sized reads that typically succeed, but random access is not supported.
