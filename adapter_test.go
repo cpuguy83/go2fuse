@@ -265,7 +265,7 @@ func TestOsDirFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		server.Unmount()
+		server.Unmount() //nolint:errcheck
 	})
 
 	// Read root file.
