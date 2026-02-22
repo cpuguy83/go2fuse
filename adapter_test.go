@@ -1,4 +1,4 @@
-package go2fuse_test
+package go2fuse
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/cpuguy83/go2fuse"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -21,7 +20,7 @@ func mountFS(t testing.TB, fsys iofs.FS) string {
 	mountpoint := t.TempDir()
 
 	sec := time.Second
-	server, err := go2fuse.Mount(mountpoint, fsys, &fs.Options{
+	server, err := Mount(mountpoint, fsys, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			Debug: testing.Verbose(),
 		},
@@ -254,7 +253,7 @@ func TestOsDirFS(t *testing.T) {
 
 	mountpoint := t.TempDir()
 	sec := time.Second
-	server, err := go2fuse.Mount(mountpoint, os.DirFS(dir), &fs.Options{
+	server, err := Mount(mountpoint, os.DirFS(dir), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			Debug: testing.Verbose(),
 		},
@@ -683,25 +682,6 @@ func (f *seekerFile) Seek(offset int64, whence int) (int64, error) {
 func (f *seekerFile) Close() error { return nil }
 
 func TestReadSeeker(t *testing.T) {
-	content := []byte("seeker content here")
-	fsys := &seekerFS{
-		files: map[string]*readerOnlyFileData{
-			"seek.txt": {data: content, mode: 0644},
-		},
-	}
-
-	mountpoint := mountFS(t, fsys)
-
-	got, err := os.ReadFile(filepath.Join(mountpoint, "seek.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Errorf("content mismatch: got %q, want %q", got, content)
-	}
-}
-
-func TestReadSeekerLargeFile(t *testing.T) {
 	// 1MB file via seekerFS to exercise Seeker path across multiple FUSE READ calls.
 	data := make([]byte, 1<<20)
 	for i := range data {
@@ -722,6 +702,113 @@ func TestReadSeekerLargeFile(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Errorf("large file content mismatch: got %d bytes, want %d bytes", len(got), len(data))
+	}
+}
+
+func TestSymlinkReadlink(t *testing.T) {
+	fsys := newSymlinkFS(t)
+	mountpoint := mountFS(t, fsys)
+
+	got, err := os.Readlink(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "target.txt" {
+		t.Errorf("readlink mismatch: got %q, want %q", got, "target.txt")
+	}
+}
+
+func TestSymlinkLstat(t *testing.T) {
+	fsys := newSymlinkFS(t)
+	mountpoint := mountFS(t, fsys)
+
+	info, err := os.Lstat(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&iofs.ModeSymlink == 0 {
+		t.Errorf("expected symlink mode, got %v", info.Mode())
+	}
+}
+
+func TestSymlinkReaddir(t *testing.T) {
+	fsys := newSymlinkFS(t)
+	mountpoint := mountFS(t, fsys)
+
+	entries, err := os.ReadDir(mountpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, e := range entries {
+		if e.Name() == "link.txt" {
+			found = true
+			if e.Type()&iofs.ModeSymlink == 0 {
+				t.Errorf("expected symlink type for link.txt, got %v", e.Type())
+			}
+		}
+	}
+	if !found {
+		t.Error("link.txt not found in directory listing")
+	}
+}
+
+func TestSymlinkFollowedByOpen(t *testing.T) {
+	fsys := newSymlinkFS(t)
+	mountpoint := mountFS(t, fsys)
+
+	// Reading through the symlink should follow it and return the target's content.
+	got, err := os.ReadFile(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("content mismatch: got %q, want %q", got, "hello")
+	}
+}
+
+func TestOsDirFSSymlink(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("real target")
+	if err := os.WriteFile(filepath.Join(dir, "target.txt"), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFS := os.DirFS(dir)
+
+	// Skip if os.DirFS doesn't support ReadLink/Lstat (Go < 1.25).
+	if _, ok := dirFS.(readLinkFS); !ok {
+		t.Skip("os.DirFS does not implement readLinkFS on this Go version")
+	}
+
+	mountpoint := mountFS(t, dirFS)
+
+	got, err := os.Readlink(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "target.txt" {
+		t.Errorf("readlink mismatch: got %q, want %q", got, "target.txt")
+	}
+
+	info, err := os.Lstat(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&iofs.ModeSymlink == 0 {
+		t.Errorf("expected symlink mode, got %v", info.Mode())
+	}
+
+	data, err := os.ReadFile(filepath.Join(mountpoint, "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, content) {
+		t.Errorf("content mismatch: got %q, want %q", data, content)
 	}
 }
 
