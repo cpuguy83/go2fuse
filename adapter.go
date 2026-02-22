@@ -14,6 +14,32 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+// readLinkFS matches io/fs.ReadLinkFS (added in Go 1.25).
+// Defined locally to avoid requiring Go 1.25 as the minimum module version.
+type readLinkFS interface {
+	iofs.FS
+	ReadLink(name string) (string, error)
+	Lstat(name string) (iofs.FileInfo, error)
+}
+
+// lstat returns FileInfo for name without following symlinks when fsys
+// implements readLinkFS. Otherwise it falls back to iofs.Stat.
+func lstat(fsys iofs.FS, name string) (iofs.FileInfo, error) {
+	if rlfs, ok := fsys.(readLinkFS); ok {
+		return rlfs.Lstat(name)
+	}
+	return iofs.Stat(fsys, name)
+}
+
+// readLink returns the destination of the named symbolic link.
+func readLink(fsys iofs.FS, name string) (string, error) {
+	rlfs, ok := fsys.(readLinkFS)
+	if !ok {
+		return "", &iofs.PathError{Op: "readlink", Path: name, Err: iofs.ErrInvalid}
+	}
+	return rlfs.ReadLink(name)
+}
+
 // New creates a FUSE root node that presents the given io/fs.FS as a read-only
 // FUSE filesystem. The returned InodeEmbedder can be passed to fs.Mount or
 // fs.NewNodeFS.
@@ -55,7 +81,7 @@ func (d *dirNode) childPath(name string) string {
 func (d *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	cp := d.childPath(name)
 
-	info, err := iofs.Stat(d.fsys, cp)
+	info, err := lstat(d.fsys, cp)
 	if err != nil {
 		return nil, toErrno(err)
 	}
@@ -93,6 +119,13 @@ func (d *dirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (d *dirNode) newChild(childPath string, info iofs.FileInfo) (fs.InodeEmbedder, fs.StableAttr) {
+	if info.Mode()&iofs.ModeSymlink != 0 {
+		return &symlinkNode{
+			fsys: d.fsys,
+			path: childPath,
+		}, fs.StableAttr{Mode: syscall.S_IFLNK}
+	}
+
 	if info.IsDir() {
 		return &dirNode{
 			fsys: d.fsys,
@@ -139,6 +172,35 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	return &fileHandle{file: file}, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+// symlinkNode represents a symbolic link in the adapted filesystem.
+type symlinkNode struct {
+	fs.Inode
+	fsys iofs.FS
+	path string
+}
+
+// Compile-time interface checks.
+var _ fs.InodeEmbedder = (*symlinkNode)(nil)
+var _ fs.NodeGetattrer = (*symlinkNode)(nil)
+var _ fs.NodeReadlinker = (*symlinkNode)(nil)
+
+func (s *symlinkNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	info, err := lstat(s.fsys, s.path)
+	if err != nil {
+		return toErrno(err)
+	}
+	fillAttrFromFileInfo(&out.Attr, info)
+	return 0
+}
+
+func (s *symlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	target, err := readLink(s.fsys, s.path)
+	if err != nil {
+		return nil, toErrno(err)
+	}
+	return []byte(target), 0
 }
 
 // fileHandle wraps an open fs.File for FUSE read operations.
