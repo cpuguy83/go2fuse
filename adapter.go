@@ -270,6 +270,15 @@ func fillAttrFromFileInfo(attr *fuse.Attr, info iofs.FileInfo) {
 	attr.Size = uint64(info.Size())
 	attr.Mode = goModeToFuseMode(info.Mode())
 
+	// Nlink must be non-zero: a zero value is indistinguishable from a
+	// deleted (unlinked) inode and causes runc's dead-inode guard to reject
+	// directories when using this filesystem as an overlayfs lower layer.
+	if info.IsDir() {
+		attr.Nlink = 2 // . and parent
+	} else {
+		attr.Nlink = 1
+	}
+
 	mtime := info.ModTime()
 	if !mtime.IsZero() {
 		sec := uint64(mtime.Unix())
