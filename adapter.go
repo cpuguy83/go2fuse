@@ -150,6 +150,7 @@ type fileNode struct {
 var _ fs.InodeEmbedder = (*fileNode)(nil)
 var _ fs.NodeGetattrer = (*fileNode)(nil)
 var _ fs.NodeOpener = (*fileNode)(nil)
+var _ fs.NodeReader = (*fileNode)(nil)
 
 func (f *fileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	info, err := iofs.Stat(f.fsys, f.path)
@@ -172,6 +173,22 @@ func (f *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	return &fileHandle{file: file}, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+// Read implements fs.NodeReader to handle reads that arrive without a prior
+// Open call, which can happen when the kernel negotiates CAP_NO_OPEN_SUPPORT.
+// When a file handle is present (normal Open → Read path) it is used directly;
+// otherwise the file is opened inline and Read is called on a temporary handle.
+func (f *fileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if fh != nil {
+		return fh.(*fileHandle).Read(ctx, dest, off)
+	}
+	file, err := f.fsys.Open(f.path)
+	if err != nil {
+		return nil, toErrno(err)
+	}
+	defer file.Close()
+	return (&fileHandle{file: file}).Read(ctx, dest, off)
 }
 
 // symlinkNode represents a symbolic link in the adapted filesystem.
