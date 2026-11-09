@@ -4,6 +4,7 @@ package go2fuse
 
 import (
 	"context"
+	"errors"
 	"io"
 	iofs "io/fs"
 	"path"
@@ -349,5 +350,20 @@ func toErrno(err error) syscall.Errno {
 	if err == nil {
 		return 0
 	}
-	return fs.ToErrno(err)
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno
+	}
+	switch {
+	case errors.Is(err, iofs.ErrNotExist):
+		return syscall.ENOENT
+	case errors.Is(err, iofs.ErrExist):
+		return syscall.EEXIST
+	case errors.Is(err, iofs.ErrPermission):
+		return syscall.EPERM
+	case errors.Is(err, iofs.ErrInvalid):
+		return syscall.EINVAL
+	default:
+		return fs.ToErrno(err)
+	}
 }
